@@ -1,0 +1,80 @@
+{
+  "metadata": {
+    "source": "Notification No. 1/2017 – Central Tax (Rate)",
+    "authority": "CBIC, Ministry of Finance, Government of India",
+    "description": "GST HSN to rate mapping derived from official government notifications for business invoicing",
+    "note": "Full GST rate is stored. CGST/SGST split or IGST application is handled during calculation."
+  },
+
+  "rate_slabs": [5, 12, 18, 28],
+
+  "hsn_rates": {
+    "0801": {
+      "description": "Cashew nuts, whether or not shelled or peeled",
+      "gst_rate": 5
+    },
+    "0901": {
+      "description": "Coffee, whether or not roasted or decaffeinated",
+      "gst_rate": 5
+    },
+    "0902": {
+      "description": "Tea, whether or not flavoured",
+      "gst_rate": 5
+    },
+    "1006": {
+      "description": "Rice put up in unit container and bearing a registered brand name",
+      "gst_rate": 5
+    },
+
+    "210690": {
+      "description": "Namkeens, bhujia, mixture and similar edible preparations",
+      "gst_rate": 12
+    },
+    "22029010": {
+      "description": "Soya milk drinks",
+      "gst_rate": 12
+    },
+    "22029020": {
+      "description": "Fruit pulp or fruit juice based drinks",
+      "gst_rate": 12
+    },
+    "22029030": {
+      "description": "Beverages containing milk",
+      "gst_rate": 12
+    },
+
+    "9983": {
+      "description": "Information technology and software services (software development, IT consulting, SaaS)",
+      "gst_rate": 18
+    },
+    "0402": {
+      "description": "Condensed milk and cream",
+      "gst_rate": 18
+    },
+    "1704_18": {
+      "description": "Sugar confectionery (other than chewing gum)",
+      "gst_rate": 18
+    },
+    "1520": {
+      "description": "Glycerol (crude), glycerol waters and glycerol lyes",
+      "gst_rate": 18
+    },
+
+    "1806": {
+      "description": "Chocolates and other food preparations containing cocoa",
+      "gst_rate": 28
+    },
+    "1704_28": {
+      "description": "Chewing gum, bubble gum and white chocolate (not containing cocoa)",
+      "gst_rate": 28
+    },
+    "1804": {
+      "description": "Cocoa butter, fat and oil",
+      "gst_rate": 28
+    },
+    "1805": {
+      "description": "Cocoa powder without added sugar or sweetening matter",
+      "gst_rate": 28
+    }
+  }
+}
