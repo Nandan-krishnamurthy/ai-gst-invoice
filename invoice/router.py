@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from invoice.model import InvoiceRequest, InvoiceResponse
 from invoice.invoice_engine import generate_invoice
 from app.db.database import get_db
-from app.db.crud import create_invoice as db_create_invoice, get_invoice_by_id, get_all_invoices
+from app.db.crud import create_invoice as db_create_invoice, get_invoice_by_id, get_all_invoices, get_finalized_invoices
 from app.services.pdf_generator import generate_invoice_pdf
 
 
@@ -17,20 +17,19 @@ def list_invoices(
     db: Session = Depends(get_db)
 ):
     """
-    List all invoice summaries (id, invoice_no, date, totals only) ordered by date (newest first).
-    Use GET /invoice/{id} to fetch full invoice details.
+    List finalized invoices only, sorted by newest first.
+    Use GET /invoice/{invoice_id}/pdf to download a PDF.
     """
-    summaries = get_all_invoices(db)
+    invoices = get_finalized_invoices(db)
     return [
         {
-            "id": inv.id,
-            "invoice_no": inv.invoice_no,
-            "invoice_date": inv.invoice_date,
-            "subtotal": inv.subtotal,
-            "total_gst": inv.total_gst,
-            "grand_total": inv.grand_total
+            "invoice_id": inv.id,
+            "invoice_number": inv.invoice_no,
+            "buyer_name": (inv.buyer or {}).get("name") or inv.buyer_name,
+            "total_amount": inv.grand_total,
+            "finalized_at": inv.invoice_datetime,
         }
-        for inv in summaries
+        for inv in invoices
     ]
 
 

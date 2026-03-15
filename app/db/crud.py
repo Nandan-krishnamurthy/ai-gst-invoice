@@ -39,3 +39,9 @@ def get_all_invoices(db: Session):
         Invoice.total_gst,
         Invoice.grand_total
     ).order_by(Invoice.invoice_date.desc()).all()
+
+def get_finalized_invoices(db: Session):
+    from .models import InvoiceStatus
+    return db.query(Invoice).filter(
+        Invoice.status == InvoiceStatus.finalized
+    ).order_by(Invoice.invoice_datetime.desc()).all()
