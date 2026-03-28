@@ -1,4 +1,4 @@
-function InvoicePreview({ invoice, agentState, onAccept }) {
+function InvoicePreview({ invoice }) {
   if (!invoice) {
     return null;
   }
@@ -130,12 +130,6 @@ function InvoicePreview({ invoice, agentState, onAccept }) {
           </div>
         </div>
 
-        {/* Accept Button */}
-        {agentState === "awaiting_confirmation" && (
-          <button style={styles.acceptButton} onClick={onAccept}>
-            Accept
-          </button>
-        )}
       </div>
     </div>
   );
@@ -231,19 +225,6 @@ const styles = {
   totalValue: {
     color: "#e8edf7",
     fontWeight: "700",
-  },
-  acceptButton: {
-    width: "100%",
-    background: "#e8edf7",
-    border: "none",
-    color: "#0f1727",
-    borderRadius: "8px",
-    padding: "12px 16px",
-    fontSize: "16px",
-    fontWeight: "700",
-    cursor: "pointer",
-    marginTop: "24px",
-    transition: "opacity 0.2s ease",
   },
 };
 

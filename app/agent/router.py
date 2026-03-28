@@ -16,6 +16,8 @@ from app.services.pdf_generator import generate_invoice_pdf
 from invoice.invoice_engine import generate_invoice
 from invoice.model import InvoiceRequest, Party, InvoiceItem
 from app.agent.agent_state import AgentState
+from app.customer.intent import is_customer_intent
+from app.customer.handler import handle_customer_message, has_active_customer_session
 import os
 
 
@@ -31,6 +33,17 @@ def create_or_update_draft(
     Handle agent message for draft invoice creation.
     """
     try:
+        # Router-level domain interception: customer intents bypass invoice agent.
+        # Active customer sessions always route to customer handler regardless of message content.
+        if has_active_customer_session(payload.session_id) or is_customer_intent(payload.message):
+            result = handle_customer_message(
+                session_id=payload.session_id,
+                message=payload.message,
+                db=db,
+            )
+            db.commit()
+            return result
+
         result = agent_service.handle_message(
             session_id=payload.session_id,
             message=payload.message,

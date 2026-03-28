@@ -1,6 +1,64 @@
 import { useState } from "react";
 import InvoicePreview from "./InvoicePreview";
 
+function CustomerPreview({ customer }) {
+  if (!customer) return null;
+  const fields = [
+    { label: "Name", value: customer.name },
+    { label: "GSTIN", value: customer.gstin },
+    { label: "Phone", value: customer.phone },
+    { label: "Email", value: customer.email },
+    { label: "City", value: customer.city },
+    { label: "State", value: customer.state },
+  ];
+  return (
+    <div style={customerPreviewStyles.card}>
+      <h3 style={customerPreviewStyles.heading}>Customer Details</h3>
+      {fields.map(({ label, value }) => (
+        <div key={label} style={customerPreviewStyles.row}>
+          <span style={customerPreviewStyles.label}>{label}</span>
+          <span style={customerPreviewStyles.value}>{value ?? <em style={{ opacity: 0.4 }}>—</em>}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const customerPreviewStyles = {
+  card: {
+    width: "min(760px, calc(100vw - 48px))",
+    marginTop: "20px",
+    background: "rgba(18, 25, 38, 0.82)",
+    border: "1px solid rgba(255, 255, 255, 0.14)",
+    borderRadius: "16px",
+    padding: "20px 24px",
+    boxShadow: "0 14px 45px rgba(0, 0, 0, 0.35)",
+  },
+  heading: {
+    margin: "0 0 14px 0",
+    fontSize: "18px",
+    fontWeight: "600",
+    color: "#a8c4f5",
+  },
+  row: {
+    display: "flex",
+    justifyContent: "space-between",
+    padding: "6px 0",
+    borderBottom: "1px solid rgba(255,255,255,0.07)",
+    fontSize: "15px",
+  },
+  label: {
+    color: "rgba(245, 247, 251, 0.55)",
+    fontWeight: "500",
+    minWidth: "90px",
+  },
+  value: {
+    color: "#f5f7fb",
+    textAlign: "right",
+    wordBreak: "break-all",
+  },
+};
+
 function App() {
   const createSessionId = () => `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const [sessionId, setSessionId] = useState(createSessionId());
@@ -10,11 +68,46 @@ function App() {
   const [agentState, setAgentState] = useState("");
   const [draftPreview, setDraftPreview] = useState(null);
   const [invoicePreview, setInvoicePreview] = useState(null);
+  const [customerPreview, setCustomerPreview] = useState(null);
+  const [customerSuccess, setCustomerSuccess] = useState("");
   const [draftInvoiceId, setDraftInvoiceId] = useState(null);
   const [invoices, setInvoices] = useState([]);
   const [showInvoicesPanel, setShowInvoicesPanel] = useState(false);
   const [invoicesLoading, setInvoicesLoading] = useState(false);
   const [invoicesError, setInvoicesError] = useState("");
+
+  const applyAgentPayload = (data) => {
+    const nextState = data.agent_state ?? "";
+
+    if (nextState === "finalized") {
+      resetSessionFlow();
+      return;
+    }
+
+    setAgentResponse(data.message ?? "");
+    setAgentState(nextState);
+
+    const previewPayload = data.invoice ?? data.data ?? null;
+    if (previewPayload?.type === "customer_preview") {
+      setCustomerPreview(previewPayload.data ?? null);
+      setCustomerSuccess("");
+      setInvoicePreview(null);
+      setDraftPreview(null);
+      setDraftInvoiceId(null);
+    } else if (previewPayload?.type === "customer_created") {
+      setCustomerSuccess(previewPayload.message ?? "Customer created successfully.");
+      setCustomerPreview(null);
+      setInvoicePreview(null);
+      setDraftPreview(null);
+      setDraftInvoiceId(null);
+    } else {
+      setInvoicePreview(previewPayload);
+      setCustomerPreview(null);
+      setCustomerSuccess("");
+      setDraftPreview(data.draft ?? previewPayload ?? data);
+      setDraftInvoiceId(data.draft_invoice_id ?? null);
+    }
+  };
 
   const fetchInvoices = async () => {
     try {
@@ -41,6 +134,8 @@ function App() {
     setInvoicePreview(null);
     setDraftInvoiceId(null);
     setDraftPreview(null);
+    setCustomerPreview(null);
+    setCustomerSuccess("");
     setAgentState("");
     setAgentResponse("");
     setMessage("");
@@ -59,17 +154,13 @@ function App() {
         }),
       });
 
-      const data = await response.json();
-      const nextState = data.agent_state ?? "";
-      if (nextState === "finalized") {
-        resetSessionFlow();
-      } else {
-        setAgentResponse(data.message ?? "");
-        setAgentState(nextState);
-        setDraftPreview(data.draft ?? data.invoice ?? data);
-        setInvoicePreview(data.invoice ?? null);
-        setDraftInvoiceId(data.draft_invoice_id ?? null);
+      if (!response.ok) {
+        throw new Error(`Draft request failed (${response.status})`);
       }
+
+      const data = await response.json();
+      applyAgentPayload(data);
+      setMessage("");
       console.log("Draft response:", data);
     } catch (error) {
       console.error("Error sending draft request:", error);
@@ -89,18 +180,13 @@ function App() {
         }),
       });
 
-      const data = await response.json();
-      const nextState = data.agent_state ?? "";
-      if (nextState === "finalized") {
-        resetSessionFlow();
-      } else {
-        setAgentResponse(data.message ?? "");
-        setAgentState(nextState);
-        if (data.invoice) {
-          setInvoicePreview(data.invoice);
-        }
-        setDraftInvoiceId(data.draft_invoice_id ?? null);
+      if (!response.ok) {
+        throw new Error(`Confirm request failed (${response.status})`);
       }
+
+      const data = await response.json();
+      applyAgentPayload(data);
+      setMessage("");
       console.log("Draft response:", data);
     } catch (error) {
       console.error("Error sending draft request:", error);
@@ -215,8 +301,21 @@ function App() {
           <button onClick={handleFinalize}>Finalize Invoice</button>
         </div>
       )}
-      {invoicePreview && (
-        <InvoicePreview invoice={invoicePreview} agentState={agentState} onAccept={handleAccept} />
+      {invoicePreview && invoicePreview.type !== "customer_preview" && invoicePreview.type !== "customer_created" && (
+        <InvoicePreview invoice={invoicePreview} />
+      )}
+      {customerPreview && (
+        <CustomerPreview customer={customerPreview} />
+      )}
+      {agentState === "awaiting_confirmation" && (invoicePreview || customerPreview) && (
+        <button style={{ marginTop: "16px" }} onClick={handleAccept}>
+          {customerPreview ? "Confirm Customer" : "Confirm Invoice"}
+        </button>
+      )}
+      {customerSuccess && (
+        <div style={{ marginTop: "16px", color: "#7defa1", fontWeight: "600", fontSize: "16px" }}>
+          {customerSuccess}
+        </div>
       )}
 
       {showInvoicesPanel && (
