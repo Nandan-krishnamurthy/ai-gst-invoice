@@ -31,10 +31,21 @@ def _normalize_party_payload(party: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+_EMPTY_HSN_VALUES = {None, "", "-", "NA"}
+
+
+def _is_missing_hsn(value) -> bool:
+    """Return True when value represents an absent or placeholder HSN code."""
+    return value in _EMPTY_HSN_VALUES
+
+
 def _get_items_missing_hsn(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Get list of items with GST rate > 0 that are missing HSN code.
-    
+
+    Treats None, "", "-", and "NA" as missing values so placeholder
+    initialisation (e.g. hsn_code="-") does not suppress the prompt.
+
     Returns:
         List of dicts with 'description' and 'index' of items missing HSN
     """
@@ -43,7 +54,7 @@ def _get_items_missing_hsn(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         # Safely handle None values: treat missing/None gst_rate as 0
         gst_rate = item.get("gst_rate") or 0
         hsn_code = item.get("hsn_code")
-        if gst_rate > 0 and not hsn_code:
+        if gst_rate > 0 and _is_missing_hsn(hsn_code):
             missing_hsn_items.append({
                 "description": item.get("description", "unknown"),
                 "index": idx

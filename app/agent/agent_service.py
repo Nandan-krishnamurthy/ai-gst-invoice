@@ -154,6 +154,38 @@ def handle_message(session_id: str, message: str, db: Session) -> AgentResponse:
     if "create invoice" in message_lower:
         logger.info("branch_create_invoice session_id=%s using_existing_draft_id=%s", session_id, active_draft_id)
 
+        def is_minimum_invoice_valid(data: Dict[str, Any]) -> bool:
+            buyer = data.get("buyer") or {}
+            items = data.get("items") or []
+            buyer_name = (buyer.get("name") or "").strip()
+
+            if buyer_name and "gstin" in buyer_name.lower():
+                return False
+            if not (buyer_name or buyer.get("gstin")):
+                return False
+            if not items:
+                return False
+
+            for item in items:
+                quantity = item.get("quantity")
+                price = item.get("price") or item.get("unit_price")
+                try:
+                    if float(quantity) <= 0 or float(price) <= 0:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+
+            return True
+
+        def is_complex_input(raw_message: str) -> bool:
+            lowered_message = raw_message.lower()
+            return (
+                len(raw_message.split()) >= 10
+                or "gstin" in lowered_message
+                or "," in raw_message
+                or "address" in lowered_message
+            )
+
         # Lightweight one-line extraction for mixed messages while preserving existing flow.
         create_update_payload = {}
         create_existing_buyer = copy.deepcopy(draft.buyer) if draft and draft.buyer else {}
@@ -215,28 +247,60 @@ def handle_message(session_id: str, message: str, db: Session) -> AgentResponse:
             create_update_payload["items"] = create_existing_items
             create_has_composite_entities = True
 
-        # If regex extraction did NOT find items, attempt LLM extraction fallback
-        if not create_has_composite_entities:
-            logger.info("create_invoice_regex_no_items_trying_llm session_id=%s", session_id)
+        # Validation-driven LLM fallback must run before any create-invoice return.
+        regex_is_valid = is_minimum_invoice_valid(create_update_payload)
+        input_is_complex = is_complex_input(message)
+        logger.info(
+            "create_invoice_debug session_id=%s payload=%s regex_is_valid=%s input_is_complex=%s gate=%s",
+            session_id,
+            create_update_payload,
+            regex_is_valid,
+            input_is_complex,
+            (not regex_is_valid and input_is_complex),
+        )
+
+        if not regex_is_valid and input_is_complex:
+            logger.info(
+                "create_invoice_validation_failed_trying_llm session_id=%s regex_valid=%s complex=%s",
+                session_id,
+                regex_is_valid,
+                input_is_complex,
+            )
             try:
                 extracted_data = extract_invoice_data(message)
-                llm_items = extracted_data.get("items") if extracted_data else None
-                if llm_items:
-                    logger.info("create_invoice_llm_items_found session_id=%s count=%s", session_id, len(llm_items))
-                    # Merge LLM-extracted items with existing items
-                    create_existing_items.extend(llm_items)
-                    create_update_payload["items"] = create_existing_items
-                    create_has_composite_entities = True
-                    
-                    # Also merge any LLM-extracted buyer data with regex-extracted buyer data
-                    llm_buyer = extracted_data.get("buyer")
-                    if llm_buyer:
-                        # Merge: LLM buyer data fills in missing fields from regex extraction
-                        merged_buyer = copy.deepcopy(create_existing_buyer)
-                        for key in ["name", "gstin", "address", "state"]:
-                            if not merged_buyer.get(key) and llm_buyer.get(key):
-                                merged_buyer[key] = llm_buyer[key]
-                        create_update_payload["buyer"] = _normalize_party_payload(merged_buyer)
+                if extracted_data and is_minimum_invoice_valid(extracted_data):
+                    llm_update_payload = {}
+                    if extracted_data.get("buyer"):
+                        llm_update_payload["buyer"] = _normalize_party_payload(extracted_data.get("buyer"))
+                    if extracted_data.get("items"):
+                        llm_update_payload["items"] = extracted_data.get("items")
+
+                    if llm_update_payload:
+                        draft_service.update_draft(
+                            draft_id=active_draft_id,
+                            invoice_data=llm_update_payload,
+                            db=db,
+                        )
+                        draft = db.query(Invoice).filter(Invoice.id == active_draft_id).first()
+                        handled_create_invoice = True
+
+                        logger.info(
+                            "create_invoice_llm_override_applied session_id=%s draft_id=%s",
+                            session_id,
+                            active_draft_id,
+                        )
+                        preview = _build_invoice_preview(draft)
+                        warnings = _get_non_critical_warnings(draft)
+                        critical_errors = _check_critical_validation_errors(draft)
+                        return AgentResponse(
+                            message="Invoice draft updated from your input.",
+                            agent_state=AgentState.AWAITING_CONFIRMATION,
+                            draft_invoice_id=active_draft_id,
+                            invoice=preview,
+                            warnings=warnings if warnings else None,
+                            missing_fields=critical_errors if critical_errors else None,
+                            next_expected_input="Add more details if needed, then confirm or finalize."
+                        )
             except Exception as llm_err:
                 logger.error("create_invoice_llm_extraction_failed session_id=%s error=%s", session_id, llm_err)
 
@@ -433,8 +497,54 @@ def handle_message(session_id: str, message: str, db: Session) -> AgentResponse:
             next_expected_input=next_input
         )
     
+    # Logic 2.5: Standalone buyer GSTIN update
+    elif re.search(r"\b[0-9A-Z]{15}\b", message.upper()):
+        logger.info("branch_buyer_gstin_update session_id=%s draft_id=%s", session_id, active_draft_id)
+        if not draft:
+            return AgentResponse(
+                message="No active invoice found. Please create an invoice first using 'create invoice'.",
+                agent_state=AgentState.COLLECTING_INFO,
+                next_expected_input="Use 'create invoice' to start a new invoice"
+            )
+
+        gstin_match = re.search(r"\b[0-9A-Z]{15}\b", message.upper())
+        if not gstin_match:
+            return AgentResponse(
+                message="Could not extract GSTIN. Please provide a valid 15-character GSTIN.",
+                agent_state=AgentState.AWAITING_CONFIRMATION,
+                draft_invoice_id=active_draft_id,
+                invoice=_build_invoice_preview(draft),
+                next_expected_input="Provide GSTIN like '27ABCDE1234F1Z5'"
+            )
+
+        gstin = gstin_match.group(0)
+        buyer_payload = copy.deepcopy(draft.buyer) if draft.buyer else {}
+        buyer_payload["gstin"] = gstin
+
+        updated_draft = draft_service.update_draft(
+            draft_id=active_draft_id,
+            invoice_data={"buyer": _normalize_party_payload(buyer_payload)},
+            db=db,
+        )
+
+        return AgentResponse(
+            message=f"GSTIN updated: {gstin}",
+            agent_state=AgentState.AWAITING_CONFIRMATION,
+            draft_invoice_id=active_draft_id,
+            invoice={
+                "invoice_no": updated_draft["invoice_no"],
+                "seller": updated_draft["seller"],
+                "buyer": updated_draft["buyer"],
+                "items": updated_draft["items"],
+                "subtotal": updated_draft["subtotal"],
+                "total_gst": updated_draft["total_gst"],
+                "grand_total": updated_draft["grand_total"],
+            },
+            next_expected_input="Add more details if needed, then confirm or finalize."
+        )
+
     # Logic 3: Update GST rate for items
-    elif "gst" in message_lower and "add" not in message_lower:
+    elif re.search(r"\b\d{1,2}\s*%?\s*gst\b|\bgst\s*\d{1,2}\b", message_lower):
         logger.info("branch_gst_update session_id=%s draft_id=%s", session_id, active_draft_id)
         if not draft:
             return AgentResponse(
@@ -606,12 +716,20 @@ def handle_message(session_id: str, message: str, db: Session) -> AgentResponse:
                     next_expected_input="Specify exact item description"
                 )
             
-            # Update the matched item
+            # Update the matched item. Keep both keys in sync for compatibility
+            # with payloads that still carry legacy `hsn` placeholders.
             current_items[matched_indices[0]]["hsn_code"] = hsn_code
+            current_items[matched_indices[0]]["hsn"] = hsn_code
             
         else:
             # Generic HSN input - only accept if exactly one item is missing HSN
             missing_hsn = _get_items_missing_hsn(current_items)
+            if len(missing_hsn) == 0:
+                missing_hsn = [
+                    {"description": item.get("description", "unknown"), "index": idx}
+                    for idx, item in enumerate(current_items)
+                    if item.get("hsn_code") in (None, "", "-", "NA")
+                ]
             
             if len(missing_hsn) == 0:
                 warnings = _get_non_critical_warnings(draft)
@@ -637,7 +755,9 @@ def handle_message(session_id: str, message: str, db: Session) -> AgentResponse:
                 )
             
             # Exactly one item missing HSN - assign it
-            current_items[missing_hsn[0]["index"]]["hsn_code"] = hsn_code
+            target_idx = missing_hsn[0]["index"]
+            current_items[target_idx]["hsn_code"] = hsn_code
+            current_items[target_idx]["hsn"] = hsn_code
         
         # Update draft with new items
         updated_draft = draft_service.update_draft(
@@ -695,8 +815,54 @@ def handle_message(session_id: str, message: str, db: Session) -> AgentResponse:
             next_expected_input=next_input
         )
     
+    # Logic 4.5: Standalone buyer address update
+    elif re.search(r"^address\s+(.+)", message, re.IGNORECASE):
+        logger.info("branch_buyer_address_update session_id=%s draft_id=%s", session_id, active_draft_id)
+        if not draft:
+            return AgentResponse(
+                message="No active invoice found. Please create an invoice first using 'create invoice'.",
+                agent_state=AgentState.COLLECTING_INFO,
+                next_expected_input="Use 'create invoice' to start a new invoice"
+            )
+
+        address_match = re.search(r"^address\s+(.+)", message, re.IGNORECASE)
+        if not address_match:
+            return AgentResponse(
+                message="Could not extract address. Please use format: address <full address>",
+                agent_state=AgentState.AWAITING_CONFIRMATION,
+                draft_invoice_id=active_draft_id,
+                invoice=_build_invoice_preview(draft),
+                next_expected_input="Provide address like 'address 21 Linking Road, Mumbai'"
+            )
+
+        address = address_match.group(1).strip()
+        buyer_payload = copy.deepcopy(draft.buyer) if draft.buyer else {}
+        buyer_payload["address"] = address
+
+        updated_draft = draft_service.update_draft(
+            draft_id=active_draft_id,
+            invoice_data={"buyer": _normalize_party_payload(buyer_payload)},
+            db=db,
+        )
+
+        return AgentResponse(
+            message=f"Address updated: {address}",
+            agent_state=AgentState.AWAITING_CONFIRMATION,
+            draft_invoice_id=active_draft_id,
+            invoice={
+                "invoice_no": updated_draft["invoice_no"],
+                "seller": updated_draft["seller"],
+                "buyer": updated_draft["buyer"],
+                "items": updated_draft["items"],
+                "subtotal": updated_draft["subtotal"],
+                "total_gst": updated_draft["total_gst"],
+                "grand_total": updated_draft["grand_total"],
+            },
+            next_expected_input="Add more details if needed, then confirm or finalize."
+        )
+
     # Logic 5: Add item
-    elif "add" in message_lower:
+    elif re.search(r"\badd\b", message_lower):
         logger.info("branch_add_item session_id=%s draft_id=%s", session_id, active_draft_id)
         if not draft:
             return AgentResponse(

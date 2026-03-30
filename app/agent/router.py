@@ -19,6 +19,7 @@ from app.agent.agent_state import AgentState
 from app.customer.intent import is_customer_intent
 from app.customer.handler import handle_customer_message, has_active_customer_session
 import os
+import copy
 
 
 router = APIRouter(prefix="/agent", tags=["Agent"])
@@ -83,15 +84,22 @@ def edit_draft(
                 detail=f"Invoice {request.draft_invoice_id} is not a draft (status: {draft.status.value})."
             )
 
+        # Preserve existing buyer fields on partial buyer updates (e.g., address-only, gstin-only).
+        safe_updates = copy.deepcopy(request.updates)
+        if isinstance(safe_updates.get("buyer"), dict):
+            existing_buyer = copy.deepcopy(draft.buyer) if isinstance(draft.buyer, dict) else {}
+            existing_buyer.update(safe_updates["buyer"])
+            safe_updates["buyer"] = existing_buyer
+
         # Apply the partial update
         updated = draft_service.update_draft(
             draft_id=request.draft_invoice_id,
-            invoice_data=request.updates,
+            invoice_data=safe_updates,
             db=db
         )
 
         # Sync denormalized buyer columns if buyer was updated
-        if "buyer" in request.updates:
+        if "buyer" in safe_updates:
             buyer_data = draft.buyer or {}
             draft.buyer_name = buyer_data.get("name")
             draft.buyer_gstin = buyer_data.get("gstin")
