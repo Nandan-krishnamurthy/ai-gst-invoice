@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from app.agent.agent_state import AgentState
 from app.agent.schemas import AgentResponse
 from app.customer.crud import create_customer, find_by_gstin_or_name
+from app.customer.llm_extractor import extract_customer_llm
+from app.customer.validator import validate_customer_llm
 from app.db.database import Base, engine
 
 # ---------------------------------------------------------------------------
@@ -142,11 +144,18 @@ def _extract_inline_fields(message: str):
         free_chunks = []
         for chunk in chunks:
             lowered = chunk.lower()
-            if any(tag in lowered for tag in ["create customer", "add customer", "phone", "email", "gstin", "city", "state"]):
+            if any(tag in lowered for tag in ["phone", "email", "gstin", "city", "state"]):
                 continue
             if re.search(r"[6-9]\d{9}", chunk) or "@" in chunk:
                 continue
-            free_chunks.append(" ".join(chunk.split()).title())
+
+            cleaned_chunk = " ".join(chunk.split())
+            from_m = re.search(r"\bfrom\s+([A-Za-z][A-Za-z\s.-]{1,60})$", cleaned_chunk, re.IGNORECASE)
+            if from_m:
+                cleaned_chunk = from_m.group(1).strip()
+
+            if cleaned_chunk:
+                free_chunks.append(cleaned_chunk.title())
 
         if len(free_chunks) >= 2:
             city = city or free_chunks[-2]
@@ -265,6 +274,20 @@ def handle_customer_message(session_id: str, message: str, db: Session) -> Agent
         email = extracted["email"]
         city = extracted["city"]
         state_value = extracted["state"]
+
+        # LLM fallback: only when regex is weak (missing name or missing phone)
+        if not name or not phone:
+            try:
+                llm_raw = extract_customer_llm(text)
+                llm_clean = validate_customer_llm(llm_raw)
+                if not name:
+                    name = llm_clean.get("name")
+                if not phone:
+                    phone = llm_clean.get("phone")
+                if not email:
+                    email = llm_clean.get("email")
+            except Exception:
+                pass  # LLM failure is non-fatal; regex result continues unchanged
 
         if not name:
             return AgentResponse(

@@ -5,6 +5,8 @@ CUSTOMER_INTENT_PATTERNS = [
 	r"^\s*create\s+customer\b",
 	r"^\s*add\s+customer\b",
 	r"^\s*create\s+customer\s+account\b",
+	r"^\s*create\s+(?:a\s+|an\s+)?(?:new\s+)?customer\b",
+	r"^\s*(?:register|onboard)\s+(?:a\s+|an\s+)?customer\b",
 ]
 
 
