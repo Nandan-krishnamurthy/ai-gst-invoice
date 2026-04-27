@@ -26,6 +26,7 @@ from engine.gst_calculator import calculate_gst
 from invoice.router import router as invoice_router
 from app.agent.router import router as agent_router
 from app.api.upload_test import router as upload_test_router
+from app.customer.router import router as customer_router
 
 app = FastAPI(
     title="GST Invoice API",
@@ -35,10 +36,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173"
-    ],
+    allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,6 +46,7 @@ app.add_middleware(
 app.include_router(invoice_router)
 app.include_router(agent_router)
 app.include_router(upload_test_router)
+app.include_router(customer_router)
 
 # ============================================================================
 # REQUEST MODELS

@@ -15,6 +15,7 @@ except ImportError:
         id = Column(Integer, primary_key=True, index=True)
         name = Column(String, nullable=False, index=True)
         gstin = Column(String, nullable=True, unique=True, index=True)
+        address = Column(String, nullable=True)
         city = Column(String, nullable=True)
         state = Column(String, nullable=True)
         customer_type = Column(String, nullable=False)
@@ -26,6 +27,7 @@ def map_customer_state_to_customer_payload(customer_state: Dict[str, Any]) -> Di
     """
     name = (customer_state.get("name") or "").strip()
     gstin = (customer_state.get("gstin") or "").strip().upper() or None
+    address = (customer_state.get("address") or "").strip() or None
     city = (customer_state.get("city") or "").strip() or None
     state = (customer_state.get("state") or "").strip() or None
 
@@ -35,6 +37,7 @@ def map_customer_state_to_customer_payload(customer_state: Dict[str, Any]) -> Di
     return {
         "name": name,
         "gstin": gstin,
+        "address": address,
         "city": city,
         "state": state,
         "customer_type": "B2B" if gstin else "B2C",
@@ -47,6 +50,7 @@ def create_customer(db: Session, customer_state: Dict[str, Any], auto_commit: bo
     customer = Customer(
         name=payload["name"],
         gstin=payload["gstin"],
+        address=payload["address"],
         city=payload["city"],
         state=payload["state"],
         customer_type=payload["customer_type"],

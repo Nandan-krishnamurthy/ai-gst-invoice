@@ -1,12 +1,12 @@
 import re
 from typing import Any, Dict, Optional
 
-from sqlalchemy import Column, ForeignKey, Integer, String
+from sqlalchemy import Column, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Session
 
 from app.agent.agent_state import AgentState
 from app.agent.schemas import AgentResponse
-from app.customer.crud import create_customer, find_by_gstin_or_name
+from app.customer.crud import Customer, create_customer
 from app.customer.llm_extractor import extract_customer_llm
 from app.customer.validator import validate_customer_llm
 from app.db.database import Base, engine
@@ -33,6 +33,31 @@ except ImportError:
 
 # Session-scoped in-memory customer conversation state.
 CUSTOMER_STATE: Dict[str, Dict[str, Any]] = {}
+CUSTOMER_OPTIONAL_FIELDS = ("gstin", "phone", "email", "city", "state")
+CUSTOMER_SKIP_TOKENS = {"skip", "no", "none", "na", "n/a"}
+CUSTOMER_CONFIRM_TOKENS = {"confirm", "yes", "create", "done", "ok", "proceed"}
+FIELD_PROMPTS = {
+    "gstin": (
+        "Do you want to add GSTIN? (optional — reply 'skip' to skip)",
+        "Provide GSTIN or reply 'skip'.",
+    ),
+    "phone": (
+        "What is the phone number? (optional — reply 'skip' to skip)",
+        "Provide a 10-digit phone number or reply 'skip'.",
+    ),
+    "email": (
+        "What is the email address? (optional — reply 'skip' to skip)",
+        "Provide email or reply 'skip'.",
+    ),
+    "city": (
+        "What is the city? (optional — reply 'skip' to skip)",
+        "Provide city name or reply 'skip'.",
+    ),
+    "state": (
+        "What is the state? (optional — reply 'skip' to skip)",
+        "Provide state name or reply 'skip'.",
+    ),
+}
 
 
 def _get_state(session_id: str) -> Dict[str, Any]:
@@ -47,6 +72,7 @@ def _get_state(session_id: str) -> Dict[str, Any]:
                 "state": None,
             },
             "awaiting": None,
+            "skipped_fields": set(),
         }
     return CUSTOMER_STATE[session_id]  # Already has city, state initialized
 
@@ -187,6 +213,18 @@ def _extract_gstin(message: str) -> Optional[str]:
     return bare.group(1).upper() if bare else None
 
 
+def normalize_phone_number(phone: Optional[str]) -> Optional[str]:
+    if not phone:
+        return None
+
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    if len(digits) == 10 and digits[0] in "6789":
+        return digits
+    return None
+
+
 def _extract_phone(message: str) -> Optional[str]:
     m = re.search(r"(?:\+?91[-\s]?)?([6-9]\d{9})\b", message)
     return m.group(1) if m else None
@@ -197,6 +235,46 @@ def _extract_email(message: str) -> Optional[str]:
     return m.group(0).lower() if m else None
 
 
+def _is_skip_input(text: str) -> bool:
+    return text.lower() in CUSTOMER_SKIP_TOKENS
+
+
+def _get_next_pending_field(state: Dict[str, Any], customer_state: Dict[str, Any]) -> Optional[str]:
+    skipped_fields = state.get("skipped_fields", set())
+    for field in CUSTOMER_OPTIONAL_FIELDS:
+        if customer_state.get(field):
+            continue
+        if field in skipped_fields:
+            continue
+        return field
+    return None
+
+
+def _ask_for_field(field: str, customer_state: Dict[str, Any]) -> AgentResponse:
+    message, next_expected_input = FIELD_PROMPTS[field]
+    return AgentResponse(
+        message=message,
+        agent_state=AgentState.COLLECTING_INFO,
+        invoice=build_customer_preview(customer_state),
+        next_expected_input=next_expected_input,
+    )
+
+
+def _advance_customer_flow(state: Dict[str, Any], customer_state: Dict[str, Any]) -> AgentResponse:
+    next_field = _get_next_pending_field(state, customer_state)
+    if next_field:
+        state["awaiting"] = next_field
+        return _ask_for_field(next_field, customer_state)
+
+    state["awaiting"] = "confirm"
+    return AgentResponse(
+        message="All optional details have been reviewed. Confirm to create customer or cancel to abort.",
+        agent_state=AgentState.AWAITING_CONFIRMATION,
+        invoice=build_customer_preview(customer_state, ready=True),
+        next_expected_input="Reply 'confirm' to create or 'cancel' to abort.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # DB save: both customers + customer_contacts
 # ---------------------------------------------------------------------------
@@ -204,19 +282,55 @@ def _extract_email(message: str) -> Optional[str]:
 def _save_customer(session_id: str, customer_state: Dict[str, Any], db: Session) -> AgentResponse:
     name = customer_state["name"]
     gstin = customer_state.get("gstin")
+    address = customer_state.get("address")
     city = customer_state.get("city")
     state_value = customer_state.get("state")
     phone = customer_state.get("phone")
     email = customer_state.get("email")
 
-    existing = find_by_gstin_or_name(db=db, name=name, gstin=gstin)
-    if existing:
+    normalized_name = (name or "").strip()
+    normalized_phone = normalize_phone_number(phone)
+    normalized_email = (email or "").strip().lower() or None
+
+    duplicate_query = (
+        db.query(Customer, CustomerContact)
+        .join(CustomerContact, Customer.id == CustomerContact.customer_id)
+        .filter(func.lower(Customer.name) == normalized_name.lower())
+    )
+
+    if normalized_phone is None:
+        duplicate_query = duplicate_query.filter(CustomerContact.phone.is_(None))
+    else:
+        duplicate_query = duplicate_query.filter(CustomerContact.phone == normalized_phone)
+
+    if normalized_email is None:
+        duplicate_query = duplicate_query.filter(CustomerContact.email.is_(None))
+    else:
+        duplicate_query = duplicate_query.filter(func.lower(CustomerContact.email) == normalized_email)
+
+    duplicate_match = duplicate_query.first()
+    if duplicate_match:
+        existing, existing_contact = duplicate_match
         name_display = " ".join(w.capitalize() for w in existing.name.split())
+        existing_customer_data = {
+            "id": existing.id,
+            "name": name_display,
+            "gstin": existing.gstin,
+            "address": existing.address,
+            "phone": existing_contact.phone,
+            "email": existing_contact.email,
+            "city": existing.city,
+            "state": existing.state,
+        }
         _clear_state(session_id)
         return AgentResponse(
-            message=f"Customer {name_display} already exists.",
-            agent_state=AgentState.AWAITING_CONFIRMATION,
-            invoice={"type": "customer_created", "message": f"Customer {name_display} already exists."},
+            message="Customer already exists",
+            agent_state=AgentState.COMPLETED,
+            invoice={
+                "type": "customer_created",
+                "data": existing_customer_data,
+                "message": "Customer already exists",
+            },
             next_expected_input="",
         )
 
@@ -225,6 +339,7 @@ def _save_customer(session_id: str, customer_state: Dict[str, Any], db: Session)
         customer_state={
             "name": name,
             "gstin": gstin,
+            "address": address,
             "city": city,
             "state": state_value,
         },
@@ -235,7 +350,7 @@ def _save_customer(session_id: str, customer_state: Dict[str, Any], db: Session)
     contact = CustomerContact(
         customer_id=customer_id,
         contact_name=name,
-        phone=phone,
+        phone=normalized_phone,
         email=email,
         designation=None,
     )
@@ -244,11 +359,25 @@ def _save_customer(session_id: str, customer_state: Dict[str, Any], db: Session)
     db.commit()
 
     name_display = " ".join(w.capitalize() for w in name.split())
+    customer_data = {
+        "id": created.id,
+        "name": name_display,
+        "gstin": gstin,
+        "address": address,
+        "phone": normalized_phone,
+        "email": email,
+        "city": city,
+        "state": state_value,
+    }
     _clear_state(session_id)
     return AgentResponse(
         message=f"Customer {name_display} created successfully.",
-        agent_state=AgentState.AWAITING_CONFIRMATION,
-        invoice={"type": "customer_created", "message": f"Customer {name_display} created successfully."},
+        agent_state=AgentState.COMPLETED,
+        invoice={
+            "type": "customer_created",
+            "data": customer_data,
+            "message": "Customer created successfully",
+        },
         next_expected_input="",
     )
 
@@ -262,6 +391,19 @@ def handle_customer_message(session_id: str, message: str, db: Session) -> Agent
     state = _get_state(session_id)
     customer_state = state["customer"]
     awaiting = state.get("awaiting")
+    skipped_fields = state.setdefault("skipped_fields", set())
+
+    # ------------------------------------------------------------------
+    # Session safety check: detect stale/corrupted state
+    # ------------------------------------------------------------------
+    if awaiting and not customer_state.get("name"):
+        # Session exists but critical field (name) is missing - state is corrupted
+        CUSTOMER_STATE.pop(session_id, None)
+        return AgentResponse(
+            message="Session expired, please start again",
+            agent_state=AgentState.COLLECTING_INFO,
+            next_expected_input="Use 'create customer <name>' to begin a new session.",
+        )
 
     # ------------------------------------------------------------------
     # Step 1: Initial trigger
@@ -275,19 +417,16 @@ def handle_customer_message(session_id: str, message: str, db: Session) -> Agent
         city = extracted["city"]
         state_value = extracted["state"]
 
-        # LLM fallback: only when regex is weak (missing name or missing phone)
-        if not name or not phone:
+        # LLM fallback: only name is required; optional fields are best-effort.
+        if not name:
             try:
                 llm_raw = extract_customer_llm(text)
                 llm_clean = validate_customer_llm(llm_raw)
-                if not name:
-                    name = llm_clean.get("name")
-                if not phone:
-                    phone = llm_clean.get("phone")
-                if not email:
-                    email = llm_clean.get("email")
+                name = llm_clean.get("name") or name
+                phone = phone or llm_clean.get("phone")
+                email = email or llm_clean.get("email")
             except Exception:
-                pass  # LLM failure is non-fatal; regex result continues unchanged
+                pass
 
         if not name:
             return AgentResponse(
@@ -303,287 +442,128 @@ def handle_customer_message(session_id: str, message: str, db: Session) -> Agent
         customer_state["city"] = city
         customer_state["state"] = state_value
 
-        # Determine next step: gstin → phone → email → city (if all prior present)
-        if not gstin:
-            state["awaiting"] = "gstin"
-            return AgentResponse(
-                message="Do you want to add GSTIN? (optional — reply 'skip' to skip)",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide GSTIN or reply 'skip'.",
-            )
+        for field in CUSTOMER_OPTIONAL_FIELDS:
+            if customer_state.get(field):
+                skipped_fields.discard(field)
 
-        if not phone:
-            state["awaiting"] = "phone"
-            return AgentResponse(
-                message="What is the phone number?",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide a 10-digit phone number.",
-            )
-
-        if not email:
-            state["awaiting"] = "email"
-            return AgentResponse(
-                message="What is the email address?",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide email or reply 'skip'.",
-            )
-
-        if not customer_state.get("city"):
-            state["awaiting"] = "city"
-            return AgentResponse(
-                message="What is the city?",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide city name.",
-            )
-
-        if not customer_state.get("state"):
-            state["awaiting"] = "state"
-            return AgentResponse(
-                message="What is the state?",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide state name.",
-            )
-
-        state["awaiting"] = "confirm"
-        return AgentResponse(
-            message="All details collected. Confirm to create customer.",
-            agent_state=AgentState.AWAITING_CONFIRMATION,
-            invoice=build_customer_preview(customer_state, ready=True),
-            next_expected_input="Reply 'confirm' to create or 'cancel' to abort.",
-        )
+        return _advance_customer_flow(state, customer_state)
 
     # ------------------------------------------------------------------
-    # Step 2: GSTIN collection (optional)
+    # Step 2+: Optional field collection in fixed order
     # ------------------------------------------------------------------
-    if awaiting == "gstin":
-        if text.lower() in {"skip", "no", "none", "na", "n/a"}:
-            customer_state["gstin"] = None
-        else:
-            gstin = _extract_gstin(text)
-            if not gstin:
+    if awaiting in CUSTOMER_OPTIONAL_FIELDS:
+        normalized_text = text.lower().strip()
+        is_confirm_intent = normalized_text in CUSTOMER_CONFIRM_TOKENS
+        is_skip_intent = _is_skip_input(text)
+        field_updated = False
+
+        # Always attempt to extract and persist the currently awaited field first.
+        # This guarantees backend state has the latest value before confirm/advance.
+        if awaiting == "gstin":
+            value = _extract_gstin(text)
+            if value:
+                customer_state["gstin"] = value
+                skipped_fields.discard("gstin")
+                field_updated = True
+
+        elif awaiting == "phone":
+            value = _extract_phone(text)
+            if value:
+                customer_state["phone"] = value
+                skipped_fields.discard("phone")
+                field_updated = True
+
+        elif awaiting == "email":
+            value = _extract_email(text)
+            if value:
+                customer_state["email"] = value
+                skipped_fields.discard("email")
+                field_updated = True
+
+        elif awaiting == "city":
+            extracted = _extract_inline_fields(text)
+            value = extracted.get("city")
+            if not value:
+                value = text.strip()
+
+            if value:
+                customer_state["city"] = " ".join(value.split()).title()
+                skipped_fields.discard("city")
+                field_updated = True
+            if extracted.get("state") and not customer_state.get("state"):
+                customer_state["state"] = " ".join(extracted["state"].split()).title()
+                skipped_fields.discard("state")
+
+        elif awaiting == "state":
+            extracted = _extract_inline_fields(text)
+            value = extracted.get("state")
+            if not value:
+                value = text.strip()
+
+            if value:
+                customer_state["state"] = " ".join(value.split()).title()
+                skipped_fields.discard("state")
+                field_updated = True
+
+        if is_confirm_intent:
+            return _save_customer(session_id=session_id, customer_state=customer_state, db=db)
+
+        if is_skip_intent:
+            customer_state[awaiting] = None
+            skipped_fields.add(awaiting)
+            return _advance_customer_flow(state, customer_state)
+
+        if field_updated:
+            return _advance_customer_flow(state, customer_state)
+
+        if awaiting == "gstin":
+            return AgentResponse(
+                message="Could not read GSTIN. Provide a valid GSTIN or reply 'skip'.",
+                agent_state=AgentState.COLLECTING_INFO,
+                invoice=build_customer_preview(customer_state),
+                next_expected_input="Provide GSTIN like '29ABCDE1234F1Z5' or reply 'skip'.",
+            )
+
+        if awaiting == "phone":
+            return AgentResponse(
+                message="Could not read phone number. Provide a valid 10-digit number or reply 'skip'.",
+                agent_state=AgentState.COLLECTING_INFO,
+                invoice=build_customer_preview(customer_state),
+                next_expected_input="Provide a 10-digit phone number or reply 'skip'.",
+            )
+
+        if awaiting == "email":
+            return AgentResponse(
+                message="Could not read email. Provide a valid email or reply 'skip'.",
+                agent_state=AgentState.COLLECTING_INFO,
+                invoice=build_customer_preview(customer_state),
+                next_expected_input="Provide a valid email or reply 'skip'.",
+            )
+
+        if awaiting == "city":
+            if _looks_like_full_customer_command(text):
                 return AgentResponse(
-                    message="Could not read GSTIN. Provide a valid GSTIN or reply 'skip'.",
+                    message="Please provide only city name (e.g., Bangalore) or 'city Bangalore', or reply 'skip'.",
                     agent_state=AgentState.COLLECTING_INFO,
                     invoice=build_customer_preview(customer_state),
-                    next_expected_input="Provide GSTIN like '29ABCDE1234F1Z5' or reply 'skip'.",
+                    next_expected_input="Provide city name only or reply 'skip'.",
                 )
-            customer_state["gstin"] = gstin
-
-        if not customer_state.get("phone"):
-            state["awaiting"] = "phone"
             return AgentResponse(
-                message="What is the phone number?",
+                message="City cannot be empty. Provide city name or reply 'skip'.",
                 agent_state=AgentState.COLLECTING_INFO,
                 invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide a 10-digit phone number.",
+                next_expected_input="Provide city name or reply 'skip'.",
             )
 
-        if not customer_state.get("email"):
-            state["awaiting"] = "email"
-            return AgentResponse(
-                message="What is the email address?",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide email or reply 'skip'.",
-            )
-
-        if not customer_state.get("city"):
-            state["awaiting"] = "city"
-            return AgentResponse(
-                message="What is the city?",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide city name.",
-            )
-
-        if not customer_state.get("state"):
-            state["awaiting"] = "state"
-            return AgentResponse(
-                message="What is the state?",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide state name.",
-            )
-
-        state["awaiting"] = "confirm"
         return AgentResponse(
-            message="All details collected. Confirm to create customer.",
-            agent_state=AgentState.AWAITING_CONFIRMATION,
-            invoice=build_customer_preview(customer_state, ready=True),
-            next_expected_input="Reply 'confirm' to create or 'cancel' to abort.",
-        )
-
-    # ------------------------------------------------------------------
-    # Step 3: Phone collection (required)
-    # ------------------------------------------------------------------
-    if awaiting == "phone":
-        phone = _extract_phone(text)
-        if not phone:
-            return AgentResponse(
-                message="Could not read phone number. Provide a valid 10-digit number.",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide a 10-digit phone number.",
-            )
-        customer_state["phone"] = phone
-
-        inline_email = _extract_email(text)
-        if inline_email:
-            customer_state["email"] = inline_email
-            state["awaiting"] = "city"
-            return AgentResponse(
-                message="What is the city?",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide city name.",
-            )
-
-        if not customer_state.get("email"):
-            state["awaiting"] = "email"
-            return AgentResponse(
-                message="What is the email address?",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide email or reply 'skip'.",
-            )
-
-        if not customer_state.get("city"):
-            state["awaiting"] = "city"
-            return AgentResponse(
-                message="What is the city?",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide city name.",
-            )
-
-        if not customer_state.get("state"):
-            state["awaiting"] = "state"
-            return AgentResponse(
-                message="What is the state?",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide state name.",
-            )
-
-        state["awaiting"] = "confirm"
-        return AgentResponse(
-            message="All details collected. Confirm to create customer.",
-            agent_state=AgentState.AWAITING_CONFIRMATION,
-            invoice=build_customer_preview(customer_state, ready=True),
-            next_expected_input="Reply 'confirm' to create or 'cancel' to abort.",
-        )
-
-    # ------------------------------------------------------------------
-    # Step 4: Email collection (optional)
-    # ------------------------------------------------------------------
-    if awaiting == "email":
-        if text.lower() in {"skip", "no", "none", "na", "n/a"}:
-            customer_state["email"] = None
-        else:
-            email = _extract_email(text)
-            if not email:
-                return AgentResponse(
-                    message="Could not read email. Provide a valid email or reply 'skip'.",
-                    agent_state=AgentState.COLLECTING_INFO,
-                    invoice=build_customer_preview(customer_state),
-                    next_expected_input="Provide a valid email or reply 'skip'.",
-                )
-            customer_state["email"] = email
-
-        # Move to city collection after email
-        state["awaiting"] = "city"
-        return AgentResponse(
-            message="What is the city?",
+            message="State cannot be empty. Provide state name or reply 'skip'.",
             agent_state=AgentState.COLLECTING_INFO,
             invoice=build_customer_preview(customer_state),
-            next_expected_input="Provide city name.",
+            next_expected_input="Provide state name or reply 'skip'.",
         )
 
     # ------------------------------------------------------------------
-    # Step 5: City collection (free text)
-    # ------------------------------------------------------------------
-    if awaiting == "city":
-        extracted = _extract_inline_fields(text)
-        city = extracted.get("city") or text.strip()
-
-        # Guard against storing full command/message into city.
-        if _looks_like_full_customer_command(text) and not extracted.get("city"):
-            return AgentResponse(
-                message="Please provide only city name (e.g., Bangalore) or 'city Bangalore'.",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide city name only.",
-            )
-
-        if not city:
-            return AgentResponse(
-                message="City cannot be empty. Please provide a city name.",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide city name.",
-            )
-
-        customer_state["city"] = " ".join(city.split()).title()
-
-        # If state was included in the same input, capture it and move to confirmation.
-        if extracted.get("state"):
-            customer_state["state"] = " ".join(extracted["state"].split()).title()
-            state["awaiting"] = "confirm"
-            return AgentResponse(
-                message="All details collected. Confirm to create customer.",
-                agent_state=AgentState.AWAITING_CONFIRMATION,
-                invoice=build_customer_preview(customer_state, ready=True),
-                next_expected_input="Reply 'confirm' to create or 'cancel' to abort.",
-            )
-
-        state["awaiting"] = "state"
-        return AgentResponse(
-            message="What is the state?",
-            agent_state=AgentState.COLLECTING_INFO,
-            invoice=build_customer_preview(customer_state),
-            next_expected_input="Provide state name.",
-        )
-
-    # ------------------------------------------------------------------
-    # Step 6: State collection (free text)
-    # ------------------------------------------------------------------
-    if awaiting == "state":
-        extracted = _extract_inline_fields(text)
-        state_value = extracted.get("state") or text.strip()
-
-        if _looks_like_full_customer_command(text) and not extracted.get("state"):
-            return AgentResponse(
-                message="Please provide only state name (e.g., Karnataka) or 'state Karnataka'.",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide state name only.",
-            )
-
-        if not state_value:
-            return AgentResponse(
-                message="State cannot be empty. Please provide a state name.",
-                agent_state=AgentState.COLLECTING_INFO,
-                invoice=build_customer_preview(customer_state),
-                next_expected_input="Provide state name.",
-            )
-        customer_state["state"] = " ".join(state_value.split()).title()
-
-        # All details collected → move to confirmation
-        state["awaiting"] = "confirm"
-        return AgentResponse(
-            message="All details collected. Confirm to create customer.",
-            agent_state=AgentState.AWAITING_CONFIRMATION,
-            invoice=build_customer_preview(customer_state, ready=True),
-            next_expected_input="Reply 'confirm' to create or 'cancel' to abort.",
-        )
-
-    # ------------------------------------------------------------------
-    # Step 7: Confirmation — DB write happens here
+    # Confirmation — DB write happens here after all optional fields reviewed
     # ------------------------------------------------------------------
     if awaiting == "confirm":
         if text.lower() in {"confirm", "yes", "create", "ok", "proceed"}:
@@ -611,4 +591,5 @@ def handle_customer_message(session_id: str, message: str, db: Session) -> Agent
         agent_state=AgentState.COLLECTING_INFO,
         next_expected_input="Use 'create customer <name>' to start.",
     )
+
 

@@ -21,6 +21,9 @@ class AgentState(str, Enum):
     
     # Invoice has been finalized and generated
     FINALIZED = "finalized"
+
+    # Flow completed successfully
+    COMPLETED = "completed"
     
     # Error state - something went wrong
     ERROR = "error"

@@ -105,6 +105,7 @@ def generate_invoice_pdf(invoice) -> bytes:
     elements.append(Spacer(1, 0.2 * inch))
 
     # Seller and Buyer blocks
+    print("PDF INPUT DATA:", invoice.buyer_name, invoice.seller_name)
     seller_dict = {
     "name": invoice.seller_name,
     "gstin": invoice.seller_gstin,

@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 from datetime import date, datetime
 
 
@@ -44,3 +44,7 @@ class InvoiceResponse(BaseModel):
     taxable_total: float
     gst_total: float
     grand_total: float
+    buyer_name: Optional[str] = None
+    seller_name: Optional[str] = None
+    buyer_state: Optional[str] = None
+    seller_state: Optional[str] = None

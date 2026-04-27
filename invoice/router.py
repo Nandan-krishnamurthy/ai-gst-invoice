@@ -1,11 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from io import BytesIO
 from sqlalchemy.orm import Session
-from invoice.model import InvoiceRequest, InvoiceResponse
+from invoice.model import InvoiceResponse, InvoiceRequest, Party, InvoiceItem
 from invoice.invoice_engine import generate_invoice
 from app.db.database import get_db
-from app.db.crud import create_invoice as db_create_invoice, get_invoice_by_id, get_all_invoices, get_finalized_invoices
+from app.db.crud import create_invoice as db_create_invoice, get_invoice_by_id, get_all_invoices
 from app.services.pdf_generator import generate_invoice_pdf
 
 
@@ -17,39 +17,50 @@ def list_invoices(
     db: Session = Depends(get_db)
 ):
     """
-    List finalized invoices only, sorted by newest first.
+    List all invoices, sorted by newest first.
     Use GET /invoice/{invoice_id}/pdf to download a PDF.
     """
-    invoices = get_finalized_invoices(db)
+    invoices = get_all_invoices(db)
     return [
         {
             "invoice_id": inv.id,
             "invoice_number": inv.invoice_no,
-            "buyer_name": (inv.buyer or {}).get("name") or inv.buyer_name,
+            "buyer_name": None,
             "total_amount": inv.grand_total,
-            "finalized_at": inv.invoice_datetime,
+            "finalized_at": inv.invoice_date,
         }
         for inv in invoices
     ]
 
 
 @router.post("/create", response_model=InvoiceResponse)
-def create_invoice(
-    invoice_request: InvoiceRequest,
+async def create_invoice(
+    request: Request,
     db: Session = Depends(get_db)
 ) -> InvoiceResponse:
     """
     Create an invoice with GST calculations and save to database.
     """
-    # DIAGNOSTIC: Check request parsing
-    print("STEP 1 RAW REQUEST seller:", type(invoice_request.seller), invoice_request.seller)
-    print("STEP 1 RAW REQUEST buyer:", type(invoice_request.buyer), invoice_request.buyer)
-    print("STEP 1 RAW REQUEST items:", type(invoice_request.items), invoice_request.items)
-    
-    # Generate invoice with GST calculations (existing logic)
+    request_data = await request.json()
+    print("RAW REQUEST DATA:", request_data)
+
+    invoice_request = InvoiceRequest(
+        invoice_date=request_data["invoice_date"],
+        seller=Party(state=((request_data.get("seller") or {}).get("state") or "")),
+        buyer=Party(state=((request_data.get("buyer") or {}).get("state") or "")),
+        items=[
+            InvoiceItem(
+                description=item["description"],
+                quantity=item["quantity"],
+                unit_price=item.get("unit_price", item.get("price", 0)),
+                gst_rate=item["gst_rate"],
+            )
+            for item in (request_data.get("items") or [])
+        ],
+    )
+
     invoice_data = generate_invoice(invoice_request)
-    
-    # Transform data to match Invoice model schema
+
     db_data = {
         "invoice_no": invoice_data["invoice_no"],
         "invoice_date": invoice_data["invoice_date"],
@@ -60,18 +71,32 @@ def create_invoice(
         "gst_summary": {},
         "subtotal": invoice_data["taxable_total"],
         "total_gst": invoice_data["gst_total"],
-        "grand_total": invoice_data["grand_total"]
+        "grand_total": invoice_data["grand_total"],
+        "buyer_name": request_data.get("buyer_name") or (request_data.get("buyer") or {}).get("name"),
+        "buyer_gstin": (request_data.get("buyer") or {}).get("gstin"),
+        "buyer_address": (request_data.get("buyer") or {}).get("address"),
+        "seller_name": request_data.get("seller_name") or (request_data.get("seller") or {}).get("name"),
+        "buyer_state": (request_data.get("buyer") or {}).get("state"),
+        "seller_state": (request_data.get("seller") or {}).get("state"),
     }
-    
-    # DIAGNOSTIC: Check data before save
-    print("STEP 2 BEFORE SAVE seller:", type(db_data["seller"]), db_data["seller"])
-    print("STEP 2 BEFORE SAVE buyer:", type(db_data["buyer"]), db_data["buyer"])
-    print("STEP 2 BEFORE SAVE items:", type(db_data["items"]), db_data["items"])
-    
-    # Save to database
-    db_create_invoice(db, db_data)
-    
-    return InvoiceResponse(**invoice_data)
+
+    invoice = db_create_invoice(db, db_data)
+
+    return InvoiceResponse(
+        invoice_no=invoice.invoice_no,
+        invoice_date=invoice.invoice_date,
+        invoice_datetime=invoice.invoice_datetime,
+        seller=invoice.seller,
+        buyer=invoice.buyer,
+        items=invoice.items,
+        taxable_total=invoice.subtotal,
+        gst_total=invoice.total_gst,
+        grand_total=invoice.grand_total,
+        buyer_name=invoice.buyer_name,
+        seller_name=invoice.seller_name,
+        buyer_state=invoice.buyer_state,
+        seller_state=invoice.seller_state,
+    )
 
 
 @router.get("/{invoice_id}")

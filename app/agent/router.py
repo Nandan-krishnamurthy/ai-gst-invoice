@@ -18,11 +18,13 @@ from invoice.model import InvoiceRequest, Party, InvoiceItem
 from app.agent.agent_state import AgentState
 from app.customer.intent import is_customer_intent
 from app.customer.handler import handle_customer_message, has_active_customer_session
+from app.agent.interpreter.handler import router as interpreter_router
 import os
 import copy
 
 
 router = APIRouter(prefix="/agent", tags=["Agent"])
+router.include_router(interpreter_router)
 
 
 @router.post("/invoice/draft", response_model=AgentResponse)
@@ -174,38 +176,28 @@ def finalize_invoice(
             detail=f"Invoice {active_draft_id} is not a draft (status: {draft.status.value})."
         )
     
-    # Convert draft to finalized invoice using existing invoice engine
-    # Build InvoiceRequest from draft data
     invoice_request = InvoiceRequest(
-        invoice_date=draft.invoice_date.date() if hasattr(draft.invoice_date, 'date') else draft.invoice_date,
+        invoice_date=draft.invoice_date.date() if hasattr(draft.invoice_date, "date") else draft.invoice_date,
         seller=Party(
-            name=draft.seller_name,
-            gstin=draft.seller_gstin,
-            address=draft.seller_address,
-            state=draft.seller_state,
+            state=draft.seller_state or "",
         ),
-        
         buyer=Party(
-            name=draft.buyer_name,
-            gstin=draft.buyer_gstin,
-            address=draft.buyer_address,
-            state=draft.buyer_state,
+            state=draft.buyer_state or "",
         ),
         items=[
             InvoiceItem(
                 description=item["description"],
                 quantity=item["quantity"],
                 unit_price=item.get("price", item.get("unit_price", 0)),
-                gst_rate=item["gst_rate"]
+                gst_rate=item["gst_rate"],
             )
-            for item in draft.items
-        ]
+            for item in (draft.items or [])
+        ],
     )
-    
-    # Generate finalized invoice data
+
     finalized_data = generate_invoice(invoice_request)
-    
-    # Update draft to finalized status
+
+    # Update draft to finalized status and persist generated values on the same record.
     draft.status = InvoiceStatus.finalized
     draft.invoice_no = finalized_data["invoice_no"]
     draft.invoice_datetime = finalized_data["invoice_datetime"]

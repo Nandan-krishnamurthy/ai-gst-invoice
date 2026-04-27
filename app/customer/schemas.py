@@ -6,6 +6,7 @@ from pydantic import BaseModel, field_validator, model_validator
 class CustomerCreateInput(BaseModel):
 	name: str
 	gstin: Optional[str] = None
+	address: Optional[str] = None
 	city: Optional[str] = None
 	state: Optional[str] = None
 
@@ -17,7 +18,7 @@ class CustomerCreateInput(BaseModel):
 			raise ValueError("name is required")
 		return normalized
 
-	@field_validator("gstin", "city", "state", mode="before")
+	@field_validator("gstin", "address", "city", "state", mode="before")
 	@classmethod
 	def normalize_optional_text(cls, value):
 		if value is None:
@@ -32,6 +33,7 @@ class CustomerResponse(BaseModel):
 	id: int
 	name: str
 	gstin: Optional[str] = None
+	address: Optional[str] = None
 	city: Optional[str] = None
 	state: Optional[str] = None
 	customer_type: Literal["B2B", "B2C"] = "B2C"
@@ -44,7 +46,7 @@ class CustomerResponse(BaseModel):
 			raise ValueError("name is required")
 		return normalized
 
-	@field_validator("gstin", "city", "state", mode="before")
+	@field_validator("gstin", "address", "city", "state", mode="before")
 	@classmethod
 	def normalize_optional_text(cls, value):
 		if value is None:

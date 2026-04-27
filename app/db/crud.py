@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 from .models import Invoice
 
 def create_invoice(db: Session, invoice_data: dict):
+    print("CRUD RECEIVED DATA:", invoice_data)
     invoice = Invoice(
         invoice_no=invoice_data["invoice_no"],
         invoice_date=invoice_data["invoice_date"],
