@@ -27,6 +27,7 @@ from invoice.router import router as invoice_router
 from app.agent.router import router as agent_router
 from app.api.upload_test import router as upload_test_router
 from app.customer.router import router as customer_router
+from app.models.company_router import router as company_router
 
 app = FastAPI(
     title="GST Invoice API",
@@ -47,6 +48,7 @@ app.include_router(invoice_router)
 app.include_router(agent_router)
 app.include_router(upload_test_router)
 app.include_router(customer_router)
+app.include_router(company_router)
 
 # ============================================================================
 # REQUEST MODELS

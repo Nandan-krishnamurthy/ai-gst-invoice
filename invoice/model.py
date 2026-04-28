@@ -12,6 +12,7 @@ class InvoiceItem(BaseModel):
     quantity: float
     unit_price: float
     gst_rate: int
+    hsn_code: Optional[str] = None
 
 
 class InvoiceRequest(BaseModel):
@@ -23,6 +24,7 @@ class InvoiceRequest(BaseModel):
 
 class InvoiceItemResponse(BaseModel):
     description: str
+    hsn_code: Optional[str] = None
     quantity: float
     unit_price: float
     taxable_value: float

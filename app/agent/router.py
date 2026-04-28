@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.db.models import Invoice, InvoiceStatus
+from app.db.crud import create_invoice as db_create_invoice
 from app.agent import session_service, draft_service, agent_service
 from app.agent.schemas import (
     AgentDraftRequest,
@@ -153,13 +154,90 @@ def finalize_invoice(
     
     # Fetch active draft
     active_draft_id = session_service.get_active_draft(request.session_id, db)
-    
+
+    # --- No-draft fallback: create invoice directly from payload ---
     if not active_draft_id:
-        raise HTTPException(
-            status_code=404,
-            detail="No active draft found for this session."
+        if not request.invoice_data:
+            raise HTTPException(
+                status_code=404,
+                detail="No active draft found for this session. Provide 'invoice_data' to create directly."
+            )
+
+        raw = request.invoice_data
+        buyer = raw.get("buyer") or {}
+        seller = raw.get("seller") or {}
+        raw_items = raw.get("items") or []
+
+        invoice_request = InvoiceRequest(
+            invoice_date=raw.get("invoice_date"),
+            seller=Party(state=seller.get("state") or buyer.get("state") or ""),
+            buyer=Party(state=buyer.get("state") or ""),
+            items=[
+                InvoiceItem(
+                    description=item.get("description") or "",
+                    quantity=float(item.get("quantity") or 0),
+                    unit_price=float(item.get("unit_price") or item.get("price") or 0),
+                    gst_rate=float(item.get("gst_rate") or 0),
+                )
+                for item in raw_items
+            ],
         )
-    
+        finalized_data = generate_invoice(invoice_request)
+
+        new_invoice = db_create_invoice(db, {
+            "invoice_no": finalized_data["invoice_no"],
+            "invoice_date": finalized_data.get("invoice_date") or raw.get("invoice_date"),
+            "invoice_datetime": finalized_data["invoice_datetime"],
+            "seller": finalized_data["seller"],
+            "buyer": finalized_data["buyer"],
+            "items": finalized_data["items"],
+            "gst_summary": finalized_data.get("gst_summary", {}),
+            "subtotal": finalized_data["taxable_total"],
+            "total_gst": finalized_data["gst_total"],
+            "grand_total": finalized_data["grand_total"],
+            "buyer_name": buyer.get("name"),
+            "buyer_gstin": buyer.get("gstin"),
+            "buyer_address": buyer.get("address"),
+            "buyer_state": buyer.get("state"),
+            "seller_name": seller.get("name"),
+            "seller_gstin": seller.get("gstin"),
+            "seller_address": seller.get("address"),
+            "seller_state": seller.get("state"),
+        })
+        # create_invoice commits internally; update status to finalized
+        new_invoice.status = InvoiceStatus.finalized
+        db.commit()
+        db.refresh(new_invoice)
+
+        pdf_bytes = generate_invoice_pdf(new_invoice)
+        pdf_dir = "invoices/pdfs"
+        os.makedirs(pdf_dir, exist_ok=True)
+        pdf_filename = f"invoice_{new_invoice.invoice_no}.pdf"
+        pdf_path = os.path.join(pdf_dir, pdf_filename)
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_bytes)
+
+        from app.agent.agent_state import AgentState
+        return AgentResponse(
+            message=f"Invoice {new_invoice.invoice_no} finalized successfully.",
+            agent_state=AgentState.FINALIZED,
+            draft_invoice_id=new_invoice.id,
+            invoice={
+                "invoice_id": new_invoice.id,
+                "invoice_no": new_invoice.invoice_no,
+                "pdf_path": pdf_path,
+                "invoice_date": str(new_invoice.invoice_date),
+                "items": finalized_data["items"],
+                "subtotal": finalized_data["taxable_total"],
+                "cgst_amount": sum(item.get("cgst", 0) for item in finalized_data["items"]),
+                "sgst_amount": sum(item.get("sgst", 0) for item in finalized_data["items"]),
+                "igst_amount": sum(item.get("igst", 0) for item in finalized_data["items"]),
+                "total_tax": finalized_data["gst_total"],
+                "grand_total": finalized_data["grand_total"],
+            }
+        )
+    # --- end no-draft fallback ---
+
     # Load the draft invoice
     draft = db.query(Invoice).filter(Invoice.id == active_draft_id).first()
     
@@ -175,6 +253,11 @@ def finalize_invoice(
             status_code=400,
             detail=f"Invoice {active_draft_id} is not a draft (status: {draft.status.value})."
         )
+
+    try:
+        draft_service.validate_draft_for_finalization(draft, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     
     invoice_request = InvoiceRequest(
         invoice_date=draft.invoice_date.date() if hasattr(draft.invoice_date, "date") else draft.invoice_date,
@@ -188,8 +271,9 @@ def finalize_invoice(
             InvoiceItem(
                 description=item["description"],
                 quantity=item["quantity"],
-                unit_price=item.get("price", item.get("unit_price", 0)),
+                unit_price=item.get("unit_price", item.get("price", 0)),
                 gst_rate=item["gst_rate"],
+                hsn_code=item.get("hsn_code"),
             )
             for item in (draft.items or [])
         ],

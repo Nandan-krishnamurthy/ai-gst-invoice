@@ -163,7 +163,7 @@ def generate_invoice_pdf(invoice) -> bytes:
         
         items_data.append([
             item.get('description', ''),
-            item.get('hsn') or item.get('hsn_code', ''),
+            item.get('hsn_code', ''),
             f"{quantity:.0f}",
             f"₹{unit_price:.2f}",
             f"₹{taxable:.2f}",

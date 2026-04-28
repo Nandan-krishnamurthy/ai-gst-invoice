@@ -250,6 +250,28 @@ function App() {
   });
   const [customerCreateLoading, setCustomerCreateLoading] = useState(false);
   const [customerCreateError, setCustomerCreateError] = useState("");
+  const [sellerInfo, setSellerInfo] = useState(null);
+  const [sellerError, setSellerError] = useState("");
+
+  // Fetch seller profile once on mount — single source of truth for seller data.
+  useEffect(() => {
+    fetch("http://127.0.0.1:8000/company/")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data?.name) {
+          setSellerInfo(data);
+        } else {
+          setSellerError("Company profile not found. Please set up your company details.");
+        }
+      })
+      .catch(() => setSellerError("Could not load company profile."));
+  }, []);
+
+  // Merge seller into an invoice object so all downstream code has it.
+  const withSeller = (invoice) => {
+    if (!invoice || !sellerInfo) return invoice;
+    return { ...invoice, seller: { ...(invoice.seller ?? {}), ...sellerInfo } };
+  };
 
   const applyAgentPayload = (data) => {
     const nextState = data.agent_state ?? "";
@@ -280,7 +302,7 @@ function App() {
       setCustomerPreview(null);
       setCustomerSuccess("");
       setDraftPreview(data.draft ?? previewPayload ?? data);
-      setEditableInvoice(data.draft ?? previewPayload ?? data);
+      setEditableInvoice(withSeller(data.draft ?? previewPayload ?? data));
       setDraftInvoiceId(data.draft_invoice_id ?? null);
     }
   };
@@ -440,7 +462,7 @@ function App() {
         }, 3000);
       } else {
         const parsed = buildInvoicePreviewFromInterpreter(interpreterResult, createdCustomerId, createdCustomer);
-        setEditableInvoice(parsed ?? null);
+        setEditableInvoice(withSeller(parsed) ?? null);
         setCurrentStep("invoice");
       }
 
@@ -459,7 +481,7 @@ function App() {
       return;
     }
     const parsed = buildInvoicePreviewFromInterpreter(interpreterResult, customer_id);
-    setEditableInvoice(parsed ?? null);
+    setEditableInvoice(withSeller(parsed) ?? null);
     setCurrentStep("invoice");
   };
 
@@ -475,6 +497,7 @@ function App() {
 
       const formData = new FormData();
       formData.append("image", file);
+      formData.append("session_id", sessionId);
 
       const response = await fetch("http://127.0.0.1:8000/agent/interpreter", {
         method: "POST",
@@ -496,6 +519,11 @@ function App() {
 
       const data = await response.json();
       setInterpreterResult(data);
+      setDraftInvoiceId(data.draft_invoice_id ?? null);
+      // Merge seller so the invoice preview is immediately complete.
+      if (data.invoice) {
+        data.invoice = withSeller(data.invoice);
+      }
       setCurrentStep("interpreter");
       setCustomerPreview(null);
       setCustomerSuccess("");
@@ -610,7 +638,58 @@ function App() {
   };
 
   const handleFinalize = async () => {
+    // Guard: seller must be loaded before any finalize attempt.
+    if (!sellerInfo?.name || !sellerInfo?.state || !sellerInfo?.gstin) {
+      setSellerError("Seller (company) information is missing. Cannot finalize. Please ensure your company profile is set up.");
+      return;
+    }
+
     try {
+      // Draft-based finalize: covers both NLP flow and image flow (after interpreter creates a draft).
+      if (draftInvoiceId) {
+        // Sync any UI edits (e.g. HSN codes, quantities) back to the DB draft before finalizing.
+        // Always include the authoritative seller data in the sync.
+        if (editableInvoice) {
+          const editResponse = await fetch("http://127.0.0.1:8000/agent/invoice/edit", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              draft_invoice_id: draftInvoiceId,
+              updates: { ...editableInvoice, seller: sellerInfo },
+            }),
+          });
+          if (!editResponse.ok) {
+            const errData = await editResponse.json().catch(() => ({}));
+            throw new Error(errData?.detail ?? `Failed to sync draft edits (${editResponse.status})`);
+          }
+        }
+
+        const response = await fetch("http://127.0.0.1:8000/agent/invoice/finalize", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            session_id: sessionId,
+            confirm: true,
+          }),
+        });
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData?.detail ?? `Failed to finalize invoice (${response.status})`);
+        }
+
+        const data = await response.json();
+        console.log("Finalize response:", data);
+
+        await fetchInvoices();
+
+        setInvoiceSuccess(data?.message ?? "Invoice finalized successfully.");
+        return;
+      }
+
+      // Fallback: no draft exists — build and submit directly (manual/open-invoice path).
       if (currentStep === "invoice") {
         const activeInvoice = editableInvoice;
 
@@ -674,6 +753,7 @@ function App() {
         return;
       }
 
+      // Legacy fallback: session-based finalize with no draft id in state.
       const response = await fetch("http://127.0.0.1:8000/agent/invoice/finalize", {
         method: "POST",
         headers: {
@@ -692,10 +772,7 @@ function App() {
       const data = await response.json();
       console.log("Finalize response:", data);
 
-      // If invoices panel is open, refresh it so the newly finalized invoice appears immediately.
-      if (showInvoicesPanel) {
-        await fetchInvoices();
-      }
+      await fetchInvoices();
 
       setInvoiceSuccess(data?.message ?? "Invoice finalized successfully.");
     } catch (error) {
@@ -792,7 +869,7 @@ function App() {
       }
 
       const invoice = await response.json();
-      setEditableInvoice(invoice);
+      setEditableInvoice(withSeller(invoice));
       setOpenedInvoiceId(invoice.id);
       setInvoiceMode("draft");
       setCurrentStep("invoice");
@@ -938,6 +1015,10 @@ function App() {
             </button>
           </div>
         </div>
+      )}
+
+      {sellerError && (
+        <p style={{ color: "#ffb4b4", fontSize: "13px", margin: "8px 0" }}>{sellerError}</p>
       )}
 
       {!isCustomerFlow && editableInvoice && !invoiceSuccess && !draftSaved && (

@@ -53,6 +53,7 @@ def generate_invoice(invoice_request: InvoiceRequest) -> Dict[str, Any]:
         # Build item response
         invoice_items.append({
             "description": item.description,
+            "hsn_code": item.hsn_code,
             "quantity": item.quantity,
             "unit_price": item.unit_price,
             "taxable_value": taxable_value,

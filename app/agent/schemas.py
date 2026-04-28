@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import date
@@ -56,6 +57,7 @@ class InvoiceDraftResponse(BaseModel):
 class FinalizeInvoiceRequest(BaseModel):
     session_id: str
     confirm: bool
+    invoice_data: Optional[dict] = None
 
 
 class FinalizeInvoiceResponse(BaseModel):

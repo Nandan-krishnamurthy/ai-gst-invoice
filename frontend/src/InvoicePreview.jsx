@@ -195,8 +195,8 @@ function InvoicePreview({ invoice, onInvoiceChange }) {
                   {isEditable ? (
                     <input
                       type="text"
-                      value={item?.hsn ?? item?.hsn_code ?? ""}
-                      onChange={(e) => handleItemChange(index, "hsn", e.target.value)}
+                      value={item?.hsn_code ?? item?.hsn ?? ""}
+                      onChange={(e) => handleItemChange(index, "hsn_code", e.target.value)}
                       placeholder="Enter HSN"
                       style={styles.input}
                     />

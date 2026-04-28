@@ -8,6 +8,32 @@ from invoice.invoice_engine import generate_invoice
 from invoice.model import InvoiceItem, InvoiceRequest, Party
 
 
+def _normalize_invoice_items(items_payload):
+    normalized_items = []
+    for item in items_payload or []:
+        normalized_items.append(
+            {
+                "description": item.get("description") or "",
+                "quantity": float(item.get("quantity") or 0),
+                "unit_price": float(item.get("unit_price", item.get("price", 0)) or 0),
+                "gst_rate": int(item.get("gst_rate") or 0),
+                "hsn_code": item.get("hsn_code") or item.get("hsn"),
+            }
+        )
+    return normalized_items
+
+
+def _validate_invoice_items(items_payload):
+    for index, item in enumerate(items_payload, start=1):
+        gst_rate = item.get("gst_rate") or 0
+        hsn_code = item.get("hsn_code")
+        if gst_rate > 0 and not hsn_code:
+            description = item.get("description") or f"item {index}"
+            raise ValueError(
+                f"Item {index} ({description}) is missing hsn_code for taxable line item."
+            )
+
+
 def _coerce_invoice_date(value: Any) -> date:
     if isinstance(value, datetime):
         return value.date()
@@ -25,7 +51,8 @@ def _coerce_invoice_date(value: Any) -> date:
 def create_invoice_service(db: Session, request_data: Dict[str, Any]):
     seller_payload = request_data.get("seller") or {}
     buyer_payload = request_data.get("buyer") or {}
-    items_payload = request_data.get("items") or []
+    items_payload = _normalize_invoice_items(request_data.get("items") or [])
+    _validate_invoice_items(items_payload)
 
     invoice_date = _coerce_invoice_date(request_data.get("invoice_date"))
 
@@ -37,17 +64,16 @@ def create_invoice_service(db: Session, request_data: Dict[str, Any]):
                 quantity=float(item.get("quantity") or 0),
                 unit_price=float(item.get("unit_price", item.get("price", 0)) or 0),
                 gst_rate=int(item.get("gst_rate") or 0),
+                hsn_code=item.get("hsn_code"),
             )
         )
 
     invoice_request = InvoiceRequest(
         invoice_date=invoice_date,
         seller=Party(
-            name=seller_payload.get("name"),
             state=(seller_payload.get("state") or ""),
         ),
         buyer=Party(
-            name=buyer_payload.get("name"),
             state=(buyer_payload.get("state") or ""),
         ),
         items=invoice_items,

@@ -30,6 +30,19 @@ CITY_STATE_MAP = {
 }
 
 
+def _normalize_invoice_items(items: list) -> list:
+    normalized_items = []
+    for item in items or []:
+        normalized_items.append({
+            "description": item.get("description") or "",
+            "quantity": item.get("quantity") or 0,
+            "unit_price": item.get("unit_price") or item.get("price") or 0,
+            "gst_rate": item.get("gst_rate") or 0,
+            "hsn_code": item.get("hsn_code") or item.get("hsn"),
+        })
+    return normalized_items
+
+
 def _normalize_party_data(party: dict) -> dict:
     party = party or {}
     name = party.get("name")
@@ -93,7 +106,7 @@ def create_draft(
     # Extract data from invoice_data
     seller = _normalize_party_data(invoice_data.get("seller", {}))
     buyer = _normalize_party_data(invoice_data.get("buyer", {}))
-    items = invoice_data.get("items", [])
+    items = _normalize_invoice_items(invoice_data.get("items", []))
     invoice_date = invoice_data.get("invoice_date", datetime.now(timezone.utc))
     
     # Load seller from companies table (source of truth)
@@ -216,7 +229,7 @@ def update_draft(
         draft.buyer_address = normalized_buyer.get("address")
         # buyer_state is already set above
     if "items" in invoice_data:
-        draft.items = invoice_data["items"]
+        draft.items = _normalize_invoice_items(invoice_data["items"])
     if "invoice_date" in invoice_data:
         draft.invoice_date = invoice_data["invoice_date"]
     
@@ -310,7 +323,7 @@ def _calculate_gst_summary(seller: dict, buyer: dict, items: list) -> Dict[str, 
     # Calculate for each item
     for item in items:
         quantity = item.get("quantity") or 0
-        price = item.get("price") or item.get("unit_price") or 0
+        price = item.get("unit_price") or item.get("price") or 0
         gst_rate = item.get("gst_rate") or 0
         
         taxable_value = quantity * price
@@ -414,7 +427,7 @@ def validate_draft_for_finalization(draft: Invoice, db: Session) -> None:
             item_errors.append(f"quantity (must be > 0, got {quantity})")
         
         # Validate price
-        price = item.get("price") or item.get("unit_price") or 0
+        price = item.get("unit_price") or item.get("price") or 0
         if price < 0:
             item_errors.append(f"price (must be >= 0, got {price})")
         

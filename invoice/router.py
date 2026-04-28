@@ -2,11 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from io import BytesIO
 from sqlalchemy.orm import Session
-from invoice.model import InvoiceResponse, InvoiceRequest, Party, InvoiceItem
-from invoice.invoice_engine import generate_invoice
+from invoice.model import InvoiceResponse
 from app.db.database import get_db
-from app.db.crud import create_invoice as db_create_invoice, get_invoice_by_id, get_all_invoices
+from app.db.crud import get_invoice_by_id, get_all_invoices
 from app.services.pdf_generator import generate_invoice_pdf
+from invoice.service import create_invoice_service
 
 
 router = APIRouter(prefix="/invoice", tags=["Invoice"])
@@ -44,43 +44,10 @@ async def create_invoice(
     request_data = await request.json()
     print("RAW REQUEST DATA:", request_data)
 
-    invoice_request = InvoiceRequest(
-        invoice_date=request_data["invoice_date"],
-        seller=Party(state=((request_data.get("seller") or {}).get("state") or "")),
-        buyer=Party(state=((request_data.get("buyer") or {}).get("state") or "")),
-        items=[
-            InvoiceItem(
-                description=item["description"],
-                quantity=item["quantity"],
-                unit_price=item.get("unit_price", item.get("price", 0)),
-                gst_rate=item["gst_rate"],
-            )
-            for item in (request_data.get("items") or [])
-        ],
-    )
-
-    invoice_data = generate_invoice(invoice_request)
-
-    db_data = {
-        "invoice_no": invoice_data["invoice_no"],
-        "invoice_date": invoice_data["invoice_date"],
-        "invoice_datetime": invoice_data["invoice_datetime"],
-        "seller": invoice_data["seller"],
-        "buyer": invoice_data["buyer"],
-        "items": invoice_data["items"],
-        "gst_summary": {},
-        "subtotal": invoice_data["taxable_total"],
-        "total_gst": invoice_data["gst_total"],
-        "grand_total": invoice_data["grand_total"],
-        "buyer_name": request_data.get("buyer_name") or (request_data.get("buyer") or {}).get("name"),
-        "buyer_gstin": (request_data.get("buyer") or {}).get("gstin"),
-        "buyer_address": (request_data.get("buyer") or {}).get("address"),
-        "seller_name": request_data.get("seller_name") or (request_data.get("seller") or {}).get("name"),
-        "buyer_state": (request_data.get("buyer") or {}).get("state"),
-        "seller_state": (request_data.get("seller") or {}).get("state"),
-    }
-
-    invoice = db_create_invoice(db, db_data)
+    try:
+        invoice = create_invoice_service(db, request_data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return InvoiceResponse(
         invoice_no=invoice.invoice_no,
