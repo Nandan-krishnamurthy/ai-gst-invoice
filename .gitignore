@@ -35,3 +35,6 @@ invoices/pdfs/
 # OS files
 .DS_Store
 Thumbs.db
+
+test_*.py
+debug_*.py
