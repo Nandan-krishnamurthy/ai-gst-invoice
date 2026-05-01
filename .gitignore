@@ -1,18 +1,36 @@
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 
-# Virtual environment
+# Virtual environments
 venv/
+.venv/
+env/
+
+# Logs
+*.log
 
 # Environment variables
 .env
+.env.*
+!.env.example
 
-# Generated invoices
+# Node / Frontend build artifacts
+node_modules/
+frontend/node_modules/
+dist/
+build/
+.vite/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+
+# Generated invoice outputs
 invoices/pdfs/
 
-# Node
-node_modules/
+# IDE settings
+.vscode/
+.idea/
 
 # OS files
 .DS_Store
